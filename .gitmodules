@@ -1,0 +1,3 @@
+[submodule "rave"]
+	path = rave
+	url = https://github.com/obs-fabio/RAVE.git
