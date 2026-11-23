@@ -1,0 +1,97 @@
+#!/bin/bash
+
+script_name=${0##*/}
+
+URL="https://zenodo.org/records/24469816/files/nast-ue_db.zip?download=1"
+MD5_CHECK="2d6ea809057f938f04b65dcb9f386578"
+OUTPUT="nast-ue_db.zip"
+DATA_DIR="./nast-ue_db"
+
+MODELS=(rave dr-rave ac-rave)
+
+case "$1" in
+    get_database)
+
+        if [ -d "$DATA_DIR" ] && [ -n "$(ls -A "$DATA_DIR")" ]; then
+            echo "Dataset already exists."
+            exit 0
+        fi
+
+        if [ ! -f "$OUTPUT" ]; then
+            echo "Downloading dataset..."
+            wget -c "$URL" -O "$OUTPUT" || {
+                echo "ERROR: Download failed."
+                exit 1
+            }
+        fi
+
+        echo "Checking dataset integrity..."
+        echo "$MD5_CHECK  $OUTPUT" | md5sum -c --status || {
+            echo "ERROR: Dataset MD5 verification failed."
+            exit 1
+        }
+
+        echo "Dataset -> OK"
+
+        echo "Extracting dataset..."
+        mkdir -p "$DATA_DIR"
+        unzip -q "$OUTPUT" -d "$DATA_DIR" || {
+            echo "ERROR: Dataset extraction failed."
+            exit 1
+        }
+
+        echo "Dataset extraction -> OK"
+        ;;
+
+    train_vae)
+        cd rave || exit 1
+
+        if [ ! -f "../result/vae/dataset/data.mdb" ]; then
+            python ./scripts/preprocess.py \
+                --input_path "$DATA_DIR/data/trn/" \
+                --output_path ../result/vae/dataset \
+                --channels 1 \
+                --sampling_rate 16000 \
+                --ext wav
+        else
+            echo "Dataset already preprocessed. Skipping."
+        fi
+
+        for model in "${MODELS[@]}"; do
+
+            echo "Training $model..."
+
+            if [ -f "../result/vae/exported_models/${model}.ts" ]; then
+                echo "$model -> already exported. Skipping."
+                continue
+            fi
+
+            python ./scripts/train.py \
+                --config "./configs/${model}.gin" \
+                --db_path ../result/vae/dataset \
+                --out_path "../result/vae/trn_models/${model}" \
+                --name "${model}" \
+                --gpu 0 \
+                --channels 1 \
+                --save_every 550000 \
+                --batch 32 \
+                --max_steps 1650000 || exit 1
+
+            echo "######################"
+            echo "Exporting $model..."
+
+            TRN_DIR=(../result/vae/trn_models/"${model}"/*)
+            python ./scripts/export.py \
+                --run "${TRN_DIR[0]}" \
+                --name "${model}" \
+                --output ../result/vae/exported_models \
+                --fidelity 0.95 || exit 1
+
+        done
+        ;;
+
+    *)
+        echo "$script_name {get_database, train_vae}"
+        exit 1
+        ;;
+esac
