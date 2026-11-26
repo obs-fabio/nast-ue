@@ -1,0 +1,151 @@
+#!/bin/bash
+set -e
+
+MODEL="$1"
+
+if [ -z "$MODEL" ]; then
+    echo "Usage: $0 <model>"
+    exit 1
+fi
+
+ORIGINAL_DATASET="./nast-ue_db"
+VAE_MODEL="./result/vae/exported_models/${MODEL}.ts"
+VAE_DATASET_BASEDIR="./result/datasets/"
+VAE_DATASET="${VAE_DATASET_BASEDIR}/${MODEL}"
+PROC_DATASET="./result/datasets/processed"
+
+BASE_DIR="./result/vae/classifiers"
+TRAINED_DIR="${BASE_DIR}/trained_models/spectral"
+LATENT_DIR="${BASE_DIR}/trained_models/latent"
+CROSS_DIR="${BASE_DIR}/cross_comparison/spectral"
+
+declare -A TARGETS=(
+    [ship]="CLASS"
+    [channel]="LOCAL_ID"
+    [shallow]="SHALLOW_WATER"
+)
+
+echo "========================================"
+echo "Model          : ${MODEL}"
+echo "========================================"
+
+echo ""
+echo "========= Reconstruct dataset ========="
+
+if [ ! -f "${VAE_DATASET}/data/999.wav" ]; then
+    python scripts/vae_reconstructor.py \
+            --input-dir "$ORIGINAL_DATASET" \
+            --output-dir "$VAE_DATASET_BASEDIR" \
+            --processed-dir "$PROC_DATASET" \
+            --model "$VAE_MODEL"
+else
+    echo "Dataset already reconstructed: ${VAE_DATASET}"
+fi
+
+train_classifier() {
+    local task="$1"
+    local target="$2"
+    local dataset="$3"
+    local output_dir="$4"
+
+    if [ -f "${output_dir}/best.ckpt" ]; then
+        echo "Classifier already trained: ${output_dir}"
+        return
+    fi
+
+    echo "Training ${task} classifier: ${output_dir}"
+
+    python scripts/train_classifier.py \
+        --model cnn2d \
+        --ie-target "${target}" \
+        --ie-representation spectral \
+        --output-dir "${output_dir}" \
+        --ie-dataset-dir "${dataset}" \
+        --ie-processed-dir "${PROC_DATASET}"
+}
+
+cross_evaluate() {
+    local task="$1"
+    local target="$2"
+    local original_model="${TRAINED_DIR}/${task}/original"
+    local reconstructed_model="${TRAINED_DIR}/${task}/${MODEL}"
+    local output_dir="${CROSS_DIR}/${task}/${MODEL}"
+
+    if [ -f "${output_dir}/metrics.csv" ]; then
+        echo "Cross evaluation already completed: ${output_dir}"
+        return
+    fi
+
+    echo "Cross evaluation: ${task}"
+
+    python scripts/vae_cross_classifier.py \
+        --ie-representation spectral \
+        --ie-target "${target}" \
+        --model1-type cnn2d \
+        --model1 "${original_model}" \
+        --dataset1-dir "${ORIGINAL_DATASET}" \
+        --model2-type cnn2d \
+        --model2 "${reconstructed_model}" \
+        --dataset2-dir "${VAE_DATASET}" \
+        --output-dir "${output_dir}" \
+        --ie-processed-dir "${PROC_DATASET}"
+}
+
+
+train_latent_classifier() {
+    local task="$1"
+    local target="$2"
+    local output_dir="${LATENT_DIR}/${task}/${MODEL}"
+
+    if [ -f "${output_dir}/best.ckpt" ]; then
+        echo "Latent classifier already trained: ${output_dir}"
+        return
+    fi
+
+    echo "Training latent ${task} classifier: ${output_dir}"
+
+    python scripts/train_classifier.py \
+        --model mlp \
+        --ie-target "${target}" \
+        --ie-representation latent \
+        --output-dir "${output_dir}" \
+        --ie-dataset-dir "${ORIGINAL_DATASET}" \
+        --ie-latent-model "${VAE_MODEL}" \
+        --ie-processed-dir "${PROC_DATASET}"
+}
+
+for task in "${!TARGETS[@]}"; do
+    target="${TARGETS[$task]}"
+
+    echo ""
+    echo "========= ${task}: original dataset ========="
+
+    train_classifier \
+        "${task}" \
+        "${target}" \
+        "${ORIGINAL_DATASET}" \
+        "${TRAINED_DIR}/${task}/original"
+
+    echo ""
+    echo "========= ${task}: reconstructed dataset ========="
+
+    train_classifier \
+        "${task}" \
+        "${target}" \
+        "${VAE_DATASET}" \
+        "${TRAINED_DIR}/${task}/${MODEL}"
+
+    echo ""
+    echo "========= ${task}: cross evaluation ========="
+
+    cross_evaluate "${task}" "${target}"
+
+    echo ""
+    echo "========= ${task}: latent representation ========="
+
+    train_latent_classifier "${task}" "${target}"
+
+done
+
+echo ""
+echo "========= All experiments finished ========="

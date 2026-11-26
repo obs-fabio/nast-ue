@@ -1,0 +1,211 @@
+#!/bin/bash
+set -e
+
+MODEL="$1"
+MODE="${2:-all}"
+
+if [ -z "$MODEL" ]; then
+    echo "Usage: $0 <model> [specialist|generalist|generalist_with_distance|all]"
+    exit 1
+fi
+
+if [[ ! "$MODE" =~ ^(specialist|generalist|generalist_with_distance|all)$ ]]; then
+    echo "Invalid mode: $MODE"
+    echo "Available modes: specialist, generalist, generalist_with_distance, all"
+    exit 1
+fi
+
+LATENT_MODEL="./result/vae/exported_models/${MODEL}.ts"
+UMAP_MODEL="./result/latent_analysis/umaps/umap_${MODEL}.pkl"
+BASE_DIR="./result/ldm/${MODEL}"
+
+ORIGINAL_DATASET="./nast-ue_db"
+PROC_DATASET="./result/datasets/processed"
+
+LATENT_SHIP_CLASSIFIER="./result/vae/classifiers/trained_models/latent/ship/${MODEL}"
+LATENT_CHANNEL_CLASSIFIER="./result/vae/classifiers/trained_models/latent/channel/${MODEL}"
+LATENT_SHALLOW_CLASSIFIER="./result/vae/classifiers/trained_models/latent/shallow/${MODEL}"
+
+RECONSTRUCTED_SHIP_CLASSIFIER="./result/vae/classifiers/trained_models/spectral/ship/${MODEL}/"
+RECONSTRUCTED_CHANNEL_CLASSIFIER="./result/vae/classifiers/trained_models/spectral/channel/${MODEL}/"
+RECONSTRUCTED_SHALLOW_CLASSIFIER="./result/vae/classifiers/trained_models/spectral/shallow/${MODEL}/"
+
+ORIGINAL_SHIP_CLASSIFIER="./result/vae/classifiers/trained_models/spectral/ship/original/"
+ORIGINAL_CHANNEL_CLASSIFIER="./result/vae/classifiers/trained_models/spectral/channel/original/"
+ORIGINAL_SHALLOW_CLASSIFIER="./result/vae/classifiers/trained_models/spectral/shallow/original/"
+
+
+run_specialist() {
+    echo ""
+    echo "========= Specialist training and analysis ========="
+
+    for INPUT_CH in {0..3}; do
+        for OUTPUT_CH in {0..3}; do
+
+            if [ "$INPUT_CH" -eq "$OUTPUT_CH" ]; then
+                continue
+            fi
+
+            OUT_DIR="${BASE_DIR}/models/specialist/${INPUT_CH}-${OUTPUT_CH}"
+
+            echo "========================================"
+            echo "Training ${INPUT_CH} -> ${OUTPUT_CH}"
+            echo "Output: ${OUT_DIR}"
+            echo "========================================"
+
+            python scripts/ldm_train.py \
+                --ie-latent-model "$LATENT_MODEL" \
+                --ie-dataset-dir "${ORIGINAL_DATASET}" \
+                --ie-processed-dir "${PROC_DATASET}" \
+                --output-dir "$OUT_DIR" \
+                --fixed-input-channel "$INPUT_CH" \
+                --fixed-output-channel "$OUTPUT_CH"
+
+            python scripts/ldm_visualize.py \
+                --ie-latent-model "$LATENT_MODEL" \
+                --ie-dataset-dir "${ORIGINAL_DATASET}" \
+                --ie-processed-dir "${PROC_DATASET}" \
+                --output-dir "$OUT_DIR" \
+                --ldm-checkpoint "$OUT_DIR" \
+                --umap-model "$UMAP_MODEL"
+
+            python scripts/ldm_classify.py \
+                --ie-latent-model "$LATENT_MODEL" \
+                --ie-dataset-dir "${ORIGINAL_DATASET}" \
+                --ie-processed-dir "${PROC_DATASET}" \
+                --output-dir "${BASE_DIR}/classification/latent/specialist" \
+                --ldm-checkpoint "$OUT_DIR" \
+                --model-type "mlp" \
+                --ship-model "$LATENT_SHIP_CLASSIFIER" \
+                --channel-model "$LATENT_CHANNEL_CLASSIFIER" \
+                --shallow-model "$LATENT_SHALLOW_CLASSIFIER"
+
+            python scripts/ldm_classify_reconstructed.py \
+                --ie-latent-model "$LATENT_MODEL" \
+                --ie-dataset-dir "${ORIGINAL_DATASET}" \
+                --ie-processed-dir "${PROC_DATASET}" \
+                --output-dir "${BASE_DIR}/classification/reconstructed/specialist" \
+                --ldm-checkpoint "$OUT_DIR" \
+                --model-type "cnn2d" \
+                --model-representation "spectral" \
+                --ship-model "$RECONSTRUCTED_SHIP_CLASSIFIER" \
+                --channel-model "$RECONSTRUCTED_CHANNEL_CLASSIFIER" \
+                --shallow-model "$RECONSTRUCTED_SHALLOW_CLASSIFIER"
+
+            python scripts/ldm_classify_reconstructed.py \
+                --ie-latent-model "$LATENT_MODEL" \
+                --ie-dataset-dir "${ORIGINAL_DATASET}" \
+                --ie-processed-dir "${PROC_DATASET}" \
+                --output-dir "${BASE_DIR}/classification/original/specialist" \
+                --ldm-checkpoint "$OUT_DIR" \
+                --model-type "cnn2d" \
+                --model-representation "spectral" \
+                --ship-model "$ORIGINAL_SHIP_CLASSIFIER" \
+                --channel-model "$ORIGINAL_CHANNEL_CLASSIFIER" \
+                --shallow-model "$ORIGINAL_SHALLOW_CLASSIFIER"
+
+        done
+    done
+
+    echo ""
+    echo "========= Compile specialist results ========="
+
+    python scripts/ldm_classify_compiler.py \
+        --input_dir "${BASE_DIR}/classification/latent/specialist" \
+        --output_dir "${BASE_DIR}/classification/latent/specialist_compiled"
+
+    python scripts/ldm_classify_compiler.py \
+        --input_dir "${BASE_DIR}/classification/reconstructed/specialist" \
+        --output_dir "${BASE_DIR}/classification/reconstructed/specialist_compiled"
+
+    python scripts/ldm_classify_compiler.py \
+        --input_dir "${BASE_DIR}/classification/original/specialist" \
+        --output_dir "${BASE_DIR}/classification/original/spectral_analysis_compiled"
+}
+
+run_generalist() {
+    local mode="$1"
+    local output_dir="${BASE_DIR}/models/${mode}"
+    local extra_args=()
+
+    if [ "$mode" = "generalist_with_distance" ]; then
+        extra_args+=(--embed-distance)
+    fi
+
+    echo ""
+    echo "========= Generalist training: ${mode} ========="
+
+    python scripts/ldm_train.py \
+        --ie-latent-model "$LATENT_MODEL" \
+        --ie-dataset-dir "${ORIGINAL_DATASET}" \
+        --ie-processed-dir "${PROC_DATASET}" \
+        --output-dir "$output_dir" \
+        --channel-mode variable \
+        "${extra_args[@]}"
+
+    python scripts/ldm_visualize.py \
+        --ie-latent-model "$LATENT_MODEL" \
+        --ie-dataset-dir "${ORIGINAL_DATASET}" \
+        --ie-processed-dir "${PROC_DATASET}" \
+        --output-dir "$output_dir" \
+        --ldm-checkpoint "$output_dir" \
+        --umap-model "$UMAP_MODEL"
+
+    python scripts/ldm_classify.py \
+        --ie-latent-model "$LATENT_MODEL" \
+        --ie-dataset-dir "${ORIGINAL_DATASET}" \
+        --ie-processed-dir "${PROC_DATASET}" \
+        --output-dir "${BASE_DIR}/classification/latent/${mode}" \
+        --ldm-checkpoint "$output_dir" \
+        --model-type "mlp" \
+        --ship-model "$LATENT_SHIP_CLASSIFIER" \
+        --channel-model "$LATENT_CHANNEL_CLASSIFIER" \
+        --shallow-model "$LATENT_SHALLOW_CLASSIFIER"
+
+    python scripts/ldm_classify_reconstructed.py \
+        --ie-latent-model "$LATENT_MODEL" \
+        --ie-dataset-dir "${ORIGINAL_DATASET}" \
+        --ie-processed-dir "${PROC_DATASET}" \
+        --output-dir "${BASE_DIR}/classification/reconstructed/${mode}" \
+        --ldm-checkpoint "$output_dir" \
+        --model-type "cnn2d" \
+        --model-representation "spectral" \
+        --ship-model "$RECONSTRUCTED_SHIP_CLASSIFIER" \
+        --channel-model "$RECONSTRUCTED_CHANNEL_CLASSIFIER" \
+        --shallow-model "$RECONSTRUCTED_SHALLOW_CLASSIFIER"
+
+    python scripts/ldm_classify_reconstructed.py \
+        --ie-latent-model "$LATENT_MODEL" \
+        --ie-dataset-dir "${ORIGINAL_DATASET}" \
+        --ie-processed-dir "${PROC_DATASET}" \
+        --output-dir "${BASE_DIR}/classification/original/${mode}" \
+        --ldm-checkpoint "$output_dir" \
+        --model-type "cnn2d" \
+        --model-representation "spectral" \
+        --ship-model "$ORIGINAL_SHIP_CLASSIFIER" \
+        --channel-model "$ORIGINAL_CHANNEL_CLASSIFIER" \
+        --shallow-model "$ORIGINAL_SHALLOW_CLASSIFIER"
+}
+
+case "$MODE" in
+    specialist)
+        run_specialist
+        ;;
+
+    generalist)
+        run_generalist "generalist"
+        ;;
+
+    generalist_with_distance)
+        run_generalist "generalist_with_distance"
+        ;;
+
+    all)
+        run_specialist
+        run_generalist "generalist"
+        run_generalist "generalist_with_distance"
+        ;;
+esac
+
+echo ""
+echo "========= LDM analysis finished ========="

@@ -1,6 +1,10 @@
 #!/bin/bash
+set -e
 
 script_name=${0##*/}
+script_full=`realpath $0`				#/path/build.sh
+script_path=`dirname "$script_full"`
+dir_name=`basename "$script_path"`		#Project base dir
 
 URL="https://zenodo.org/records/24469816/files/nast-ue_db.zip?download=1"
 MD5_CHECK="2d6ea809057f938f04b65dcb9f386578"
@@ -8,6 +12,8 @@ OUTPUT="nast-ue_db.zip"
 DATA_DIR="./nast-ue_db"
 
 MODELS=(rave dr-rave ac-rave)
+
+VAE_MODELS="./result/vae/exported_models/*.ts"
 
 case "$1" in
     get_database)
@@ -43,13 +49,22 @@ case "$1" in
         echo "Dataset extraction -> OK"
         ;;
 
+    install_lps)
+        for sub in "$script_path"/lps_libraries/*
+        do
+            echo "$(basename "$sub")"
+            cd "$sub/src" || continue
+            pip install -e . --user
+        done
+        ;;
+
     train_vae)
         cd rave || exit 1
 
-        if [ ! -f "../result/vae/dataset/data.mdb" ]; then
+        if [ ! -f "../result/vae/rave_db/data.mdb" ]; then
             python ./scripts/preprocess.py \
                 --input_path "$DATA_DIR/data/trn/" \
-                --output_path ../result/vae/dataset \
+                --output_path ../result/vae/rave_db \
                 --channels 1 \
                 --sampling_rate 16000 \
                 --ext wav
@@ -68,7 +83,7 @@ case "$1" in
 
             python ./scripts/train.py \
                 --config "./configs/${model}.gin" \
-                --db_path ../result/vae/dataset \
+                --db_path ../result/vae/rave_db \
                 --out_path "../result/vae/trn_models/${model}" \
                 --name "${model}" \
                 --gpu 0 \
@@ -90,8 +105,25 @@ case "$1" in
         done
         ;;
 
+    vae_analysis)
+        scripts/vae_latent_analysis
+
+        for model_path in $VAE_MODELS; do
+            model=$(basename "$model_path" .ts)
+            scripts/vae_classifiers_analysis "$model"
+        done
+        ;;
+
+    ldm)
+        for model_path in $VAE_MODELS; do
+            model=$(basename "$model_path" .ts)
+            scripts/ldm_train "$model"
+        done
+        ;;
+
+
     *)
-        echo "$script_name {get_database, train_vae}"
+        echo "$script_name {get_database, install_lps, train_vae, vae_analysis, ldm}"
         exit 1
         ;;
 esac

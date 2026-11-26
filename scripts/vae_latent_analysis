@@ -1,0 +1,87 @@
+#!/bin/bash
+set -e
+
+VAE_MODELS="./result/vae/exported_models/*.ts"
+BASE_DIR="./result/latent_analysis"
+
+ORIGINAL_DATASET="./nast-ue_db"
+PROC_DATASET="./result/datasets/processed"
+
+UMAP_DIR="${BASE_DIR}/umaps"
+
+declare -A TARGETS=(
+    [ship]="CLASS"
+    [channel]="LOCAL_ID"
+    [shallow]="SHALLOW_WATER"
+)
+
+TASKS=(ship channel shallow)
+
+visualize_latent() {
+    local task="$1"
+    local target="$2"
+    local fold_role="$3"
+    local split="$4"
+    local export_umap="$5"
+    local output_dir="${BASE_DIR}/${task}/${split}"
+
+    echo ""
+    echo "========= Latent visualization: ${task}/${split} ========="
+
+    local args=(
+        --models ${VAE_MODELS}
+        --fold-role "${fold_role}"
+        --ie-target "${target}"
+        --output-dir "${output_dir}"
+        --ie-dataset-dir "${ORIGINAL_DATASET}"
+        --ie-processed-dir "${PROC_DATASET}"
+    )
+
+    if [ "${export_umap}" = "true" ]; then
+        args+=(--export-umap)
+    fi
+
+    python scripts/vae_latent_visualize.py "${args[@]}"
+
+}
+
+extrapolate_latent() {
+    local task="$1"
+    local target="$2"
+    local output_dir="${BASE_DIR}/${task}/val"
+
+    echo ""
+    echo "========= Latent extrapolation: ${task} ========="
+
+    python scripts/vae_latent_extrapolation.py \
+        --umap-dir "${UMAP_DIR}" \
+        --models ${VAE_MODELS} \
+        --fold-role VALIDATION \
+        --ie-target "${target}" \
+        --output-dir "${output_dir}" \
+        --ie-dataset-dir "${ORIGINAL_DATASET}" \
+        --ie-processed-dir "${PROC_DATASET}"
+}
+
+for task in "${TASKS[@]}"; do
+    target="${TARGETS[$task]}"
+
+    visualize_latent "${task}" "${target}" "TRAIN" "train" true
+    visualize_latent "${task}" "${target}" "VALIDATION" "val" false
+done
+
+echo ""
+echo "========= Collect UMAP files ========="
+
+mkdir -p "${UMAP_DIR}"
+
+cp "${BASE_DIR}/ship/train"/umap_*.pkl "${UMAP_DIR}/"
+
+for task in "${TASKS[@]}"; do
+    target="${TARGETS[$task]}"
+
+    extrapolate_latent "${task}" "${target}"
+done
+
+echo ""
+echo "========= Latent analysis finished ========="
